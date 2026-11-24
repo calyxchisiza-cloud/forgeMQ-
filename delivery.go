@@ -36,9 +36,12 @@ func (t *topic) finish(g *group, offset uint64, token uint64, ack bool, again bo
 		f.timer.Stop()
 	}
 	if ack {
-		t.complete(g, offset)
+		err := t.complete(g, offset)
+		if err != nil {
+			t.giveBack(g, offset, f.attempt)
+		}
 		t.mu.Unlock()
-		return nil
+		return err
 	}
 	if again && f.attempt < g.maxAttempts {
 		delete(g.flight, offset)
@@ -52,7 +55,7 @@ func (t *topic) finish(g *group, offset uint64, token uint64, ack bool, again bo
 		reason = "rejected"
 	}
 	attempt := f.attempt
-	msg := cloneMessage(t.log[offset])
+	msg := cloneMessage(t.at(offset))
 	t.mu.Unlock()
 
 	err := t.broker.deadLetter(t.name, msg, reason, attempt)
@@ -70,7 +73,10 @@ func (t *topic) finish(g *group, offset uint64, token uint64, ack bool, again bo
 		t.cond.Broadcast()
 		return err
 	}
-	t.complete(g, offset)
+	if err := t.complete(g, offset); err != nil {
+		t.giveBack(g, offset, attempt)
+		return err
+	}
 	return nil
 }
 
@@ -90,7 +96,7 @@ func (t *topic) expire(g *group, offset uint64, token uint64) {
 		return
 	}
 	attempt := f.attempt
-	msg := cloneMessage(t.log[offset])
+	msg := cloneMessage(t.at(offset))
 	t.mu.Unlock()
 
 	err := t.broker.deadLetter(t.name, msg, "timeout", attempt)
@@ -108,14 +114,37 @@ func (t *topic) expire(g *group, offset uint64, token uint64) {
 		}
 		return
 	}
-	t.complete(g, offset)
+	if err := t.complete(g, offset); err != nil {
+		t.giveBack(g, offset, cur.attempt)
+	}
 }
 
-func (t *topic) complete(g *group, offset uint64) {
+func (t *topic) giveBack(g *group, offset uint64, attempt int) {
+	if _, ok := g.flight[offset]; !ok {
+		return
+	}
 	delete(g.flight, offset)
-	g.done[offset] = true
-	g.advance()
+	g.ready = append([]requeue{{offset: offset, attempt: attempt}}, g.ready...)
 	t.cond.Broadcast()
+}
+
+func (t *topic) complete(g *group, offset uint64) error {
+	g.done[offset] = true
+	newCommit := g.commit
+	for g.done[newCommit] {
+		newCommit++
+	}
+	if newCommit != g.commit {
+		if err := t.broker.appendCommit(t.name, g.name, newCommit); err != nil {
+			delete(g.done, offset)
+			return err
+		}
+	}
+	delete(g.flight, offset)
+	g.advance()
+	t.retain()
+	t.cond.Broadcast()
+	return nil
 }
 
 func (b *Broker) deadLetter(topicName string, msg Message, reason string, attempt int) error {
@@ -140,6 +169,11 @@ func (b *Broker) deadLetter(topicName string, msg Message, reason string, attemp
 	dest := b.topics[name]
 	if dest == nil {
 		dest = newTopic(b, name)
+		if err := dest.prepare(); err != nil {
+			dest.closeFiles()
+			b.mu.Unlock()
+			return err
+		}
 		b.topics[name] = dest
 	}
 	b.nextID++

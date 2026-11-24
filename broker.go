@@ -3,6 +3,7 @@ package forgemq
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -14,24 +15,33 @@ var (
 	ErrInvalidName   = errors.New("name is not a topic identifier")
 	ErrClosed        = errors.New("broker is closed")
 	ErrSettled       = errors.New("delivery is already settled")
+	ErrCorrupt       = errors.New("log is corrupt")
+	ErrTooLarge      = errors.New("message is too large")
 )
 
-// Config controls acknowledgement. Zero values use the defaults: a 30 second
-// timeout, 5 attempts, and one in-flight message per group.
+// Config controls acknowledgement and, for Open, where the log is stored.
+// Zero values use the defaults: a 30 second timeout, 5 attempts, one in-flight
+// message per group, and 1 MiB segments.
 type Config struct {
-	AckTimeout  time.Duration
-	MaxAttempts int
-	Prefetch    int
+	AckTimeout   time.Duration
+	MaxAttempts  int
+	Prefetch     int
+	Dir          string
+	SegmentBytes int
 }
 
-// Broker is an in-memory topic log. Each subscription group keeps its own offset.
-// Consumers in one group share that group's in-flight messages.
+// Broker is a topic log. New keeps it in memory. Open stores it in a directory
+// and reloads it after a restart. Consumers in one group share that group's
+// in-flight messages.
 type Broker struct {
-	mu     sync.Mutex
-	topics map[string]*topic
-	nextID uint64
-	closed bool
-	cfg    Config
+	mu           sync.Mutex
+	topics       map[string]*topic
+	nextID       uint64
+	closed       bool
+	cfg          Config
+	dir          string
+	segmentBytes int64
+	commits      *commitLog
 }
 
 func New() *Broker {
@@ -39,6 +49,48 @@ func New() *Broker {
 }
 
 func NewWith(cfg Config) *Broker {
+	if cfg.Dir != "" {
+		panic("forgemq.NewWith keeps the log in memory; use Open")
+	}
+	b, err := openBroker(cfg)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+// Open loads a broker from dir, creating the directory when it is missing.
+func Open(dir string) (*Broker, error) {
+	return OpenWith(Config{Dir: dir})
+}
+
+// OpenWith loads a broker from cfg.Dir.
+func OpenWith(cfg Config) (*Broker, error) {
+	if cfg.Dir == "" {
+		return nil, errors.New("data directory is required")
+	}
+	return openBroker(cfg)
+}
+
+func openBroker(cfg Config) (*Broker, error) {
+	cfg = normalize(cfg)
+	b := &Broker{
+		topics:       make(map[string]*topic),
+		cfg:          cfg,
+		dir:          cfg.Dir,
+		segmentBytes: int64(cfg.SegmentBytes),
+	}
+	if cfg.Dir == "" {
+		return b, nil
+	}
+	if err := b.load(); err != nil {
+		b.Close()
+		return nil, err
+	}
+	return b, nil
+}
+
+func normalize(cfg Config) Config {
 	if cfg.AckTimeout <= 0 {
 		cfg.AckTimeout = 30 * time.Second
 	}
@@ -48,7 +100,10 @@ func NewWith(cfg Config) *Broker {
 	if cfg.Prefetch <= 0 {
 		cfg.Prefetch = 1
 	}
-	return &Broker{topics: make(map[string]*topic), cfg: cfg}
+	if cfg.SegmentBytes <= 0 {
+		cfg.SegmentBytes = 1 << 20
+	}
+	return cfg
 }
 
 func (b *Broker) CreateTopic(name string) error {
@@ -63,12 +118,18 @@ func (b *Broker) CreateTopic(name string) error {
 	if _, ok := b.topics[name]; ok {
 		return ErrTopicExists
 	}
-	b.topics[name] = newTopic(b, name)
+	t := newTopic(b, name)
+	if err := t.prepare(); err != nil {
+		t.closeFiles()
+		return err
+	}
+	b.topics[name] = t
 	return nil
 }
 
 // Publish appends the message and returns it with its id and offset.
 // That return is the confirmation that the broker accepted the message.
+// Open syncs the record to disk before Publish returns.
 func (b *Broker) Publish(msg Message) (Message, error) {
 	if err := validName(msg.Topic); err != nil {
 		return Message{}, err
@@ -89,8 +150,8 @@ func (b *Broker) Publish(msg Message) (Message, error) {
 	return t.publish(id, msg)
 }
 
-// Subscribe registers a consumer on a group. A new group starts at offset 0.
-// Another consumer in the same group shares that group's offset.
+// Subscribe registers a consumer on a group. A new group starts at the earliest
+// offset still in the log. Another consumer in the same group shares that offset.
 func (b *Broker) Subscribe(topicName, groupName string) (*Consumer, error) {
 	if err := validName(topicName); err != nil {
 		return nil, err
@@ -112,6 +173,10 @@ func (b *Broker) Subscribe(topicName, groupName string) (*Consumer, error) {
 
 func (b *Broker) Close() {
 	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return
+	}
 	b.closed = true
 	topics := make([]*topic, 0, len(b.topics))
 	for _, t := range b.topics {
@@ -121,6 +186,9 @@ func (b *Broker) Close() {
 	for _, t := range topics {
 		t.close()
 	}
+	if b.commits != nil {
+		b.commits.close()
+	}
 }
 
 type topic struct {
@@ -128,7 +196,11 @@ type topic struct {
 	mu        sync.Mutex
 	cond      *sync.Cond
 	name      string
+	dir       string
 	log       []Message
+	base      uint64
+	segs      []*segFile
+	active    *segFile
 	groups    map[string]*group
 	nextToken uint64
 	closed    bool
@@ -162,6 +234,9 @@ type group struct {
 func newTopic(b *Broker, name string) *topic {
 	t := &topic{broker: b, name: name, groups: make(map[string]*group)}
 	t.cond = sync.NewCond(&t.mu)
+	if b.dir != "" {
+		t.dir = filepath.Join(b.dir, "data", name)
+	}
 	return t
 }
 
@@ -175,7 +250,12 @@ func (t *topic) publish(id uint64, msg Message) (Message, error) {
 	if t.closed {
 		return Message{}, ErrClosed
 	}
-	stored.Offset = uint64(len(t.log))
+	stored.Offset = t.end()
+	if t.broker.dir != "" {
+		if err := t.writeRecord(stored); err != nil {
+			return Message{}, err
+		}
+	}
 	t.log = append(t.log, cloneMessage(stored))
 	t.cond.Broadcast()
 	return cloneMessage(stored), nil
@@ -189,6 +269,8 @@ func (t *topic) join(name string) *Consumer {
 		cfg := t.broker.cfg
 		g = &group{
 			name:        name,
+			commit:      t.base,
+			next:        t.base,
 			flight:      make(map[uint64]*flight),
 			done:        make(map[uint64]bool),
 			prefetch:    cfg.Prefetch,
@@ -211,6 +293,7 @@ func (t *topic) close() {
 		}
 	}
 	t.cond.Broadcast()
+	t.closeFiles()
 	t.mu.Unlock()
 }
 
@@ -271,7 +354,7 @@ func (c *Consumer) Receive(ctx context.Context) (*Delivery, error) {
 			item := g.ready[0]
 			g.ready = g.ready[1:]
 			offset, attempt = item.offset, item.attempt
-		case g.next < uint64(len(t.log)):
+		case g.next < t.end():
 			offset = g.next
 			attempt = 1
 			g.next++
@@ -288,8 +371,16 @@ func (c *Consumer) Receive(ctx context.Context) (*Delivery, error) {
 	}
 }
 
+func (t *topic) end() uint64 {
+	return t.base + uint64(len(t.log))
+}
+
+func (t *topic) at(offset uint64) Message {
+	return t.log[offset-t.base]
+}
+
 func (t *topic) messageFor(offset uint64, attempt int) Message {
-	msg := cloneMessage(t.log[offset])
+	msg := cloneMessage(t.at(offset))
 	if attempt > 1 {
 		if msg.Headers == nil {
 			msg.Headers = make(map[string]string)

@@ -35,11 +35,15 @@ func main() {
 	}
 	ctx := context.Background()
 	for _, consumer := range []*forgemq.Consumer{accounting, analytics} {
-		msg, err := consumer.Receive(ctx)
+		delivery, err := consumer.Receive(ctx)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		fmt.Printf("%s %s %d %s\n", consumer.Group(), msg.Topic, msg.Offset, msg.Payload)
+		if err := delivery.Ack(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Printf("%s %s %d %s\n", consumer.Group(), delivery.Topic, delivery.Offset, delivery.Payload)
 	}
 }

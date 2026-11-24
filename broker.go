@@ -205,6 +205,50 @@ func (b *Broker) Publish(msg Message) (Message, error) {
 	return out, nil
 }
 
+// PublishBatch appends every message to one topic and syncs once per segment.
+// The returned messages carry ids and offsets in order. An empty batch stores nothing.
+func (b *Broker) PublishBatch(msgs []Message) ([]Message, error) {
+	if len(msgs) == 0 {
+		return nil, nil
+	}
+	if len(msgs) > maxBatch {
+		return nil, ErrTooLarge
+	}
+	topicName := msgs[0].Topic
+	if err := validName(topicName); err != nil {
+		return nil, err
+	}
+	for i := range msgs {
+		if msgs[i].Topic != topicName {
+			return nil, ErrBadRequest
+		}
+	}
+	if b.takeFault() {
+		return nil, ErrFault
+	}
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return nil, ErrClosed
+	}
+	t := b.topics[topicName]
+	if t == nil {
+		b.mu.Unlock()
+		return nil, ErrTopicNotFound
+	}
+	ids := make([]uint64, len(msgs))
+	for i := range msgs {
+		b.nextID++
+		ids[i] = b.nextID
+	}
+	b.mu.Unlock()
+	out, err := t.publishMany(ids, msgs)
+	if len(out) > 0 {
+		b.published.Add(uint64(len(out)))
+	}
+	return out, err
+}
+
 // Subscribe registers a consumer on a group. A new group starts at the earliest
 // offset still in the log. Another consumer in the same group shares that offset.
 func (b *Broker) Subscribe(topicName, groupName string) (*Consumer, error) {
@@ -296,24 +340,47 @@ func newTopic(b *Broker, name string) *topic {
 }
 
 func (t *topic) publish(id uint64, msg Message) (Message, error) {
-	stored := cloneMessage(msg)
-	stored.ID = id
-	stored.Topic = t.name
-	stored.Timestamp = time.Now().UTC()
+	out, err := t.publishMany([]uint64{id}, []Message{msg})
+	if err != nil {
+		return Message{}, err
+	}
+	return out[0], nil
+}
+
+func (t *topic) publishMany(ids []uint64, msgs []Message) ([]Message, error) {
+	now := time.Now().UTC()
+	stored := make([]Message, len(msgs))
+	for i := range msgs {
+		stored[i] = cloneMessage(msgs[i])
+		stored[i].ID = ids[i]
+		stored[i].Topic = t.name
+		stored[i].Timestamp = now
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.closed {
-		return Message{}, ErrClosed
+		return nil, ErrClosed
 	}
-	stored.Offset = t.end()
+	end := t.end()
+	for i := range stored {
+		stored[i].Offset = end + uint64(i)
+	}
+	synced := len(stored)
+	var err error
 	if t.broker.dir != "" {
-		if err := t.writeRecord(stored); err != nil {
-			return Message{}, err
-		}
+		synced, err = t.writeRecords(stored)
 	}
-	t.log = append(t.log, cloneMessage(stored))
-	t.cond.Broadcast()
-	return cloneMessage(stored), nil
+	if synced > 0 {
+		for i := 0; i < synced; i++ {
+			t.log = append(t.log, cloneMessage(stored[i]))
+		}
+		t.cond.Broadcast()
+	}
+	out := make([]Message, synced)
+	for i := 0; i < synced; i++ {
+		out[i] = cloneMessage(stored[i])
+	}
+	return out, err
 }
 
 func (t *topic) join(name string) *Consumer {
@@ -370,6 +437,19 @@ func (c *Consumer) Offset() uint64 {
 // Receive waits for the next message this group has not finished. The offset stays
 // put until Ack. A second call waits when the group already has Prefetch deliveries in flight.
 func (c *Consumer) Receive(ctx context.Context) (*Delivery, error) {
+	got, err := c.ReceiveN(ctx, 1)
+	if err != nil {
+		return nil, err
+	}
+	return got[0], nil
+}
+
+// ReceiveN returns up to n deliveries. It waits for the first one, then takes
+// further records that are already in the log without passing the group's prefetch.
+func (c *Consumer) ReceiveN(ctx context.Context, n int) ([]*Delivery, error) {
+	if n <= 0 {
+		return nil, ErrBadRequest
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -391,29 +471,32 @@ func (c *Consumer) Receive(ctx context.Context) (*Delivery, error) {
 		case <-done:
 		}
 	}()
-	for {
+	var out []*Delivery
+	for len(out) < n {
 		if t.closed {
+			if len(out) > 0 {
+				return out, nil
+			}
 			return nil, ErrClosed
 		}
 		if err := ctx.Err(); err != nil {
+			if len(out) > 0 {
+				return out, nil
+			}
 			return nil, err
 		}
 		if len(g.flight) >= g.prefetch {
+			if len(out) > 0 {
+				return out, nil
+			}
 			t.cond.Wait()
 			continue
 		}
-		var offset uint64
-		var attempt int
-		switch {
-		case len(g.ready) > 0:
-			item := g.ready[0]
-			g.ready = g.ready[1:]
-			offset, attempt = item.offset, item.attempt
-		case g.next < t.end():
-			offset = g.next
-			attempt = 1
-			g.next++
-		default:
+		offset, attempt, ok := t.nextDelivery(g)
+		if !ok {
+			if len(out) > 0 {
+				return out, nil
+			}
 			t.cond.Wait()
 			continue
 		}
@@ -423,8 +506,29 @@ func (c *Consumer) Receive(ctx context.Context) (*Delivery, error) {
 		token := f.token
 		f.timer = time.AfterFunc(g.ackTimeout, func() { t.expire(g, offset, token) })
 		t.broker.delivered.Add(1)
-		return &Delivery{Message: t.messageFor(offset, attempt), topic: t, group: g, offset: offset, token: token}, nil
+		out = append(out, &Delivery{
+			Message: t.messageFor(offset, attempt),
+			topic:   t,
+			group:   g,
+			offset:  offset,
+			token:   token,
+		})
 	}
+	return out, nil
+}
+
+func (t *topic) nextDelivery(g *group) (uint64, int, bool) {
+	if len(g.ready) > 0 {
+		item := g.ready[0]
+		g.ready = g.ready[1:]
+		return item.offset, item.attempt, true
+	}
+	if g.next < t.end() {
+		offset := g.next
+		g.next++
+		return offset, 1, true
+	}
+	return 0, 0, false
 }
 
 func (t *topic) end() uint64 {

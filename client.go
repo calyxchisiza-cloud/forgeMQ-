@@ -147,6 +147,45 @@ func (c *Client) Publish(ctx context.Context, msg Message) (Message, error) {
 	return out, nil
 }
 
+func (c *Client) PublishBatch(ctx context.Context, msgs []Message) ([]Message, error) {
+	if len(msgs) == 0 {
+		return nil, nil
+	}
+	if len(msgs) > maxBatch {
+		return nil, ErrTooLarge
+	}
+	var buf bytes.Buffer
+	putU32(&buf, uint32(len(msgs)))
+	for _, msg := range msgs {
+		if err := appendFields(&buf, msg); err != nil {
+			return nil, err
+		}
+	}
+	body, err := c.call(orBackground(ctx), opPublishBatch, buf.Bytes(), true)
+	if err != nil {
+		return nil, err
+	}
+	code, rest, err := splitStatus(body)
+	if err != nil {
+		return nil, err
+	}
+	if err := statusError(code); err != nil {
+		return nil, err
+	}
+	if len(rest) != len(msgs)*24 {
+		return nil, ErrBadRequest
+	}
+	out := make([]Message, len(msgs))
+	for i := range msgs {
+		out[i] = cloneMessage(msgs[i])
+		base := i * 24
+		out[i].ID = binary.BigEndian.Uint64(rest[base : base+8])
+		out[i].Offset = binary.BigEndian.Uint64(rest[base+8 : base+16])
+		out[i].Timestamp = time.Unix(0, int64(binary.BigEndian.Uint64(rest[base+16:base+24]))).UTC()
+	}
+	return out, nil
+}
+
 func (c *Client) Subscribe(ctx context.Context, topic, group string) (*Subscription, error) {
 	s := &Subscription{client: c, topic: topic, group: group}
 	if err := c.attach(orBackground(ctx), s); err != nil {

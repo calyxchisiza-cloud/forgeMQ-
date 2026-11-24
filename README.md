@@ -38,7 +38,7 @@ err = event.Ack()
 
 A segment is removed only after every group has moved past it. A new group then starts at the earliest offset still on disk.
 
-`Poison` appends the current delivery to the topic's dead-letter log with reason `poison` and leaves every other group on its own offset. `Stats` counts publishes, deliveries, acknowledgements, dead letters, refused clients, and injected faults. `InjectPublishFaults` fails the next publishes before a record is stored.
+`PublishBatch` appends several messages to one topic and syncs once for each segment those records fill. `ReceiveN` waits for one delivery, then takes more that are already in the log, up to the group's prefetch. `Poison` appends the current delivery to the topic's dead-letter log with reason `poison` and leaves every other group on its own offset. `Stats` counts publishes, deliveries, acknowledgements, dead letters, refused clients, and injected faults. `InjectPublishFaults` fails the next publishes before a record is stored.
 
 A broker with no principals accepts every connection. Otherwise the client presents a token, and that token may publish, consume, or both. `ListenTLS` carries the same frames over TLS.
 
@@ -70,6 +70,9 @@ The demo prints the same `orders.created` message for the accounting group and t
 ```
 go test ./...
 go test -race ./...
+go test -bench=. -benchmem -count=1 -run=^$ .
 ```
+
+`BenchmarkPublish` reports the time for one in-memory publish. `BenchmarkPublishDisk` and `BenchmarkPublishBatchDisk` include the sync. `BenchmarkConcurrentPublish` publishes from several goroutines. `BenchmarkConsume` drains a prefilled log with `ReceiveN`. Add `-memprofile mem.out` to a benchmark command to write a memory profile. The profile is not part of the broker.
 
 See [docs/architecture.md](docs/architecture.md).

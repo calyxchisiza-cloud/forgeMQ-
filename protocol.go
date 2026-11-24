@@ -13,16 +13,18 @@ const (
 	maxFrame    = maxRecordBody + 64<<10
 	framePrefix = 6
 	maxHeaders  = 1024
+	maxBatch    = 256
 
-	opCreateTopic uint16 = 1
-	opPublish     uint16 = 2
-	opSubscribe   uint16 = 3
-	opAck         uint16 = 4
-	opNack        uint16 = 5
-	opDeliver     uint16 = 6
-	opReceive     uint16 = 7
-	opAuth        uint16 = 8
-	opPoison      uint16 = 9
+	opCreateTopic  uint16 = 1
+	opPublish      uint16 = 2
+	opSubscribe    uint16 = 3
+	opAck          uint16 = 4
+	opNack         uint16 = 5
+	opDeliver      uint16 = 6
+	opReceive      uint16 = 7
+	opAuth         uint16 = 8
+	opPoison       uint16 = 9
+	opPublishBatch uint16 = 10
 
 	statusOK uint16 = iota
 	statusExists

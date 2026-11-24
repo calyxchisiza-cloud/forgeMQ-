@@ -242,24 +242,56 @@ func (t *topic) prepare() error {
 	return nil
 }
 
-func (t *topic) writeRecord(m Message) error {
-	body, err := encodeMessage(m)
-	if err != nil {
-		return err
+func (t *topic) writeRecords(msgs []Message) (int, error) {
+	framed := make([][]byte, len(msgs))
+	for i := range msgs {
+		body, err := encodeMessage(msgs[i])
+		if err != nil {
+			return 0, err
+		}
+		framed[i] = frame(body)
 	}
-	framed := frame(body)
 	if t.active == nil {
 		if err := t.prepare(); err != nil {
-			return err
+			return 0, err
 		}
 	}
-	if t.active.count > 0 && t.active.size+int64(len(framed)) > t.broker.segmentBytes {
-		if err := t.roll(m.Offset); err != nil {
+	synced := 0
+	var chunk bytes.Buffer
+	chunkCount := 0
+	flush := func() error {
+		if chunkCount == 0 {
+			return nil
+		}
+		if err := t.writeAndSync(chunk.Bytes(), chunkCount); err != nil {
 			return err
 		}
+		synced += chunkCount
+		chunk.Reset()
+		chunkCount = 0
+		return nil
 	}
-	n, err := t.active.file.Write(framed)
-	if err != nil || n != len(framed) {
+	for i, rec := range framed {
+		if t.active.count+uint64(chunkCount) > 0 && t.active.size+int64(chunk.Len()+len(rec)) > t.broker.segmentBytes {
+			if err := flush(); err != nil {
+				return synced, err
+			}
+			if err := t.roll(msgs[i].Offset); err != nil {
+				return synced, err
+			}
+		}
+		chunk.Write(rec)
+		chunkCount++
+	}
+	if err := flush(); err != nil {
+		return synced, err
+	}
+	return synced, nil
+}
+
+func (t *topic) writeAndSync(p []byte, count int) error {
+	n, err := t.active.file.Write(p)
+	if err != nil || n != len(p) {
 		t.rewindActive()
 		if err == nil {
 			err = io.ErrShortWrite
@@ -270,8 +302,8 @@ func (t *topic) writeRecord(m Message) error {
 		t.rewindActive()
 		return err
 	}
-	t.active.count++
-	t.active.size += int64(len(framed))
+	t.active.count += uint64(count)
+	t.active.size += int64(len(p))
 	return nil
 }
 

@@ -180,7 +180,7 @@ func (w *wireConn) handle(op uint16, payload []byte) []byte {
 	if op == opAuth {
 		return w.onAuth(payload)
 	}
-	consume := op != opCreateTopic && op != opPublish
+	consume := op != opCreateTopic && op != opPublish && op != opPublishBatch
 	if err := w.permit(consume); err != nil {
 		return statusBody(err)
 	}
@@ -189,6 +189,8 @@ func (w *wireConn) handle(op uint16, payload []byte) []byte {
 		return w.onCreate(payload)
 	case opPublish:
 		return w.onPublish(payload)
+	case opPublishBatch:
+		return w.onPublishBatch(payload)
 	case opSubscribe:
 		return w.onSubscribe(payload)
 	case opAck:
@@ -263,6 +265,45 @@ func (w *wireConn) onPublish(payload []byte) []byte {
 	putU64(&buf, published.ID)
 	putU64(&buf, published.Offset)
 	putU64(&buf, uint64(published.Timestamp.UnixNano()))
+	return buf.Bytes()
+}
+
+func (w *wireConn) onPublishBatch(payload []byte) []byte {
+	r := sliceReader{b: payload}
+	n, err := r.u32()
+	if err != nil || n > maxBatch {
+		return statusBody(ErrTooLarge)
+	}
+	if n == 0 {
+		if !finished(r) {
+			return statusBody(ErrBadRequest)
+		}
+		return statusBody(nil)
+	}
+	msgs := make([]Message, n)
+	for i := uint32(0); i < n; i++ {
+		msgs[i], err = readFields(&r)
+		if err != nil {
+			return statusBody(err)
+		}
+	}
+	if !finished(r) {
+		return statusBody(ErrBadRequest)
+	}
+	published, err := w.s.b.PublishBatch(msgs)
+	if err != nil || len(published) != int(n) {
+		if err == nil {
+			err = ErrBadRequest
+		}
+		return statusBody(err)
+	}
+	var buf bytes.Buffer
+	buf.Write(statusBody(nil))
+	for _, m := range published {
+		putU64(&buf, m.ID)
+		putU64(&buf, m.Offset)
+		putU64(&buf, uint64(m.Timestamp.UnixNano()))
+	}
 	return buf.Bytes()
 }
 

@@ -61,7 +61,10 @@ A topic name and a group name start with a letter or `_` and may then contain le
 
 ```
 go run ./cmd/demo
+go run ./cmd/ui
 ```
+
+The viewer listens on `127.0.0.1:8093` and opens the `data` directory. It lists every topic, including dead-letter logs. Opening a topic shows the retained records and each group's finished offset. That view does not subscribe, so a group's position stays where it is. Appending a record is a normal publish. Stop the broker before the viewer opens the same directory.
 
 The demo prints the same `orders.created` message for the accounting group and the analytics group.
 
@@ -70,7 +73,7 @@ The demo prints the same `orders.created` message for the accounting group and t
 ```
 go test ./...
 go test -race ./...
-go test -bench=. -benchmem -count=1 -run=^$ .
+go test -bench="." -benchmem -count=1 -run="^$" .
 ```
 
 `BenchmarkPublish` reports the time for one in-memory publish. `BenchmarkPublishDisk` and `BenchmarkPublishBatchDisk` include the sync. `BenchmarkConcurrentPublish` publishes from several goroutines. `BenchmarkConsume` drains a prefilled log with `ReceiveN`. Add `-memprofile mem.out` to a benchmark command to write a memory profile. The profile is not part of the broker.

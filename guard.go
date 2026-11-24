@@ -4,15 +4,15 @@ import "crypto/subtle"
 
 // Stats counts work since the broker was opened.
 type Stats struct {
-	Published    uint64
-	Delivered    uint64
-	Acked        uint64
-	Nacked       uint64
-	DeadLettered uint64
-	AuthFailures uint64
-	Limited      uint64
-	Connections  uint64
-	Faults       uint64
+	Published    uint64 `json:"published"`
+	Delivered    uint64 `json:"delivered"`
+	Acked        uint64 `json:"acked"`
+	Nacked       uint64 `json:"nacked"`
+	DeadLettered uint64 `json:"deadLettered"`
+	AuthFailures uint64 `json:"authFailures"`
+	Limited      uint64 `json:"limited"`
+	Connections  uint64 `json:"connections"`
+	Faults       uint64 `json:"faults"`
 }
 
 func (b *Broker) Stats() Stats {

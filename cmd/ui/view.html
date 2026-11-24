@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ForgeMQ</title>
+  <style>
+    :root {
+      --ink: #152028;
+      --muted: #3e515c;
+      --ground: #d7dee3;
+      --rail: #1c2428;
+      --rail-ink: #f4f7f8;
+      --rail-muted: #b7c4cb;
+      --paper: #f5f8f9;
+      --line: #c5d0d6;
+      --wax: #8f2d24;
+      --wax-ink: #fff7f4;
+      --wash: #e7eef1;
+      --mark: #f6e6e3;
+      --focus: #8f2d24;
+      color-scheme: light;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      min-height: 100%;
+      display: grid;
+      grid-template-columns: 18rem minmax(0, 1fr);
+      background: var(--ground);
+      color: var(--ink);
+      font: 16px/1.45 "Segoe UI", "Helvetica Neue", sans-serif;
+      caret-color: var(--wax);
+    }
+    ::selection { background: #e7c3be; color: var(--ink); }
+    :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+    button, input, textarea { font: inherit; color: inherit; }
+    #rail {
+      background: var(--rail);
+      color: var(--rail-ink);
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+      padding: 1.25rem 1rem 1rem;
+    }
+    .brand { margin: 0; font-size: 1.35rem; font-weight: 650; letter-spacing: -0.03em; }
+    #folder {
+      margin: 0.35rem 0 1rem;
+      color: var(--rail-muted);
+      font-size: 0.78rem;
+      overflow-wrap: anywhere;
+    }
+    #rail h2 { margin: 0 0 0.55rem; font-size: 0.95rem; font-weight: 650; }
+    #topics { display: flex; flex-direction: column; gap: 0.35rem; min-height: 0; overflow: auto; }
+    .topic {
+      width: 100%;
+      text-align: left;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--rail-ink);
+      border-radius: 2px;
+      padding: 0.55rem 0.65rem;
+      cursor: pointer;
+    }
+    .topic strong { display: block; font-weight: 650; overflow-wrap: anywhere; }
+    .topic span { display: block; color: var(--rail-muted); font-size: 0.8rem; }
+    .topic:hover { background: #2a363c; }
+    .topic[aria-current="true"] { background: var(--wax); color: var(--wax-ink); }
+    .topic[aria-current="true"] span { color: var(--wax-ink); }
+    #newtopic {
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+      margin-top: 1rem;
+      padding-top: 1rem;
+      border-top: 1px solid #3a474d;
+    }
+    #newtopic label, .compose label { font-size: 0.78rem; color: var(--rail-muted); }
+    .compose label { color: var(--muted); }
+    input, textarea {
+      background: var(--paper);
+      color: var(--ink);
+      border: 1px solid var(--line);
+      border-radius: 2px;
+      padding: 0.45rem 0.55rem;
+      min-width: 0;
+      width: 100%;
+    }
+    textarea { min-height: 6.5rem; resize: vertical; }
+    button.primary {
+      background: var(--wax);
+      border: 1px solid var(--wax);
+      color: var(--wax-ink);
+      border-radius: 2px;
+      padding: 0.5rem 0.75rem;
+      cursor: pointer;
+    }
+    button {
+      border: 1px solid var(--line);
+      background: var(--paper);
+      border-radius: 2px;
+      padding: 0.4rem 0.65rem;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--wax); }
+    button:disabled { opacity: 0.55; cursor: wait; }
+    #railstatus, #status { min-height: 1.2rem; margin: 0.55rem 0 0; font-size: 0.85rem; }
+    #railstatus { color: #f0c7c2; }
+    #status { color: var(--muted); }
+    #status.error, #railstatus.error { color: var(--wax); background: var(--mark); padding: 0.4rem 0.55rem; }
+    #railstatus.error { color: #fff7f4; background: #6e2e24; }
+    #counts {
+      margin-top: auto;
+      padding-top: 1rem;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.55rem 0.75rem;
+    }
+    #counts p { margin: 0; }
+    #counts strong { display: block; font-size: 1.15rem; font-variant-numeric: tabular-nums; }
+    #counts span { color: var(--rail-muted); font-size: 0.75rem; }
+    #stage { min-width: 0; padding: 1.25rem 1.5rem 2.5rem; }
+    .stage-head { display: flex; justify-content: space-between; gap: 1rem; align-items: flex-start; }
+    h1 { margin: 0; font-size: 1.85rem; line-height: 1.1; letter-spacing: -0.03em; overflow-wrap: anywhere; }
+    .lede { margin: 0.4rem 0 0; color: var(--muted); max-width: 68ch; }
+    .groups, .log, .compose {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      margin-top: 1rem;
+    }
+    .groups { display: flex; flex-wrap: wrap; gap: 0; }
+    .group { flex: 1 1 12rem; padding: 0.85rem 1rem; border-right: 1px solid var(--line); }
+    .group:last-child { border-right: 0; }
+    .group strong { display: block; }
+    .group span { color: var(--muted); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+    .empty-note { margin: 0; padding: 0.9rem 1rem; color: var(--muted); }
+    .pager { display: flex; gap: 0.5rem; align-items: center; margin: 0.75rem 0 0; }
+    .pager span { color: var(--muted); font-variant-numeric: tabular-nums; }
+    .record { padding: 0.9rem 1rem 1rem; border-top: 1px solid var(--line); }
+    .record:first-child { border-top: 0; }
+    .record header { display: flex; justify-content: space-between; gap: 1rem; align-items: baseline; }
+    .offset { font-variant-numeric: tabular-nums; font-weight: 650; color: var(--wax); }
+    time { color: var(--muted); font-size: 0.85rem; }
+    .key { margin: 0.35rem 0 0; font-size: 0.92rem; }
+    pre.payload {
+      margin: 0.55rem 0 0;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      max-height: 16rem;
+      overflow: auto;
+      background: var(--wash);
+      padding: 0.65rem 0.75rem;
+      font: 0.92rem/1.4 Consolas, "Cascadia Mono", monospace;
+    }
+    .headers { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.55rem; }
+    .chip {
+      background: var(--wash);
+      border: 1px solid var(--line);
+      padding: 0.15rem 0.4rem;
+      font-size: 0.78rem;
+      overflow-wrap: anywhere;
+    }
+    .chip.reason { background: var(--mark); border-color: #e0b2ab; color: var(--wax); }
+    .compose { padding: 1rem; }
+    .compose h2 { margin: 0 0 0.75rem; font-size: 1.05rem; }
+    .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+    .fields .wide { grid-column: 1 / -1; }
+    @media (max-width: 800px) {
+      body { grid-template-columns: 1fr; }
+      #rail { min-height: auto; }
+      #counts { margin-top: 1rem; }
+      .fields { grid-template-columns: 1fr; }
+      .group { border-right: 0; border-bottom: 1px solid var(--line); }
+    }
+  </style>
+</head>
+<body>
+  <aside id="rail">
+    <h1 class="brand">ForgeMQ</h1>
+    <p id="folder"></p>
+    <h2>Topics</h2>
+    <div id="topics"></div>
+    <form id="newtopic">
+      <label for="topicname">New topic</label>
+      <input id="topicname" name="name" autocomplete="off" spellcheck="false" required>
+      <button class="primary" type="submit">Create topic</button>
+      <p id="railstatus" role="status"></p>
+    </form>
+    <div id="counts"></div>
+  </aside>
+  <main id="stage">
+    <div class="stage-head">
+      <div>
+        <h1 id="title">Topics</h1>
+        <p class="lede" id="lede">Choose a topic to read its log. Reading here does not move a group.</p>
+      </div>
+      <button id="refresh" type="button">Refresh</button>
+    </div>
+    <p id="status" role="status"></p>
+    <div id="detail"></div>
+  </main>
+  <script>
+    const folder = document.querySelector("#folder");
+    const topicsEl = document.querySelector("#topics");
+    const countsEl = document.querySelector("#counts");
+    const titleEl = document.querySelector("#title");
+    const ledeEl = document.querySelector("#lede");
+    const detailEl = document.querySelector("#detail");
+    const statusEl = document.querySelector("#status");
+    const railStatus = document.querySelector("#railstatus");
+    let current = "";
+    let pageFrom = null;
+
+    function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+    function el(tag, cls, text) {
+      const node = document.createElement(tag);
+      if (cls) node.className = cls;
+      if (text != null) node.textContent = text;
+      return node;
+    }
+    function setStatus(node, text, bad) {
+      node.textContent = text || "";
+      node.classList.toggle("error", !!bad);
+    }
+    async function api(path, opts) {
+      const res = await fetch(path, opts);
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || res.statusText);
+      return body;
+    }
+    function recordLabel(n) {
+      return n === 1 ? "1 record" : n + " records";
+    }
+
+    async function loadCatalog() {
+      const data = await api("/api/catalog");
+      folder.textContent = data.dir;
+      clear(topicsEl);
+      if (!data.topics.length) {
+        topicsEl.appendChild(el("p", "lede", "This folder has no topics yet."));
+      }
+      for (const topic of data.topics) {
+        const button = el("button", "topic");
+        button.type = "button";
+        button.appendChild(el("strong", "", topic.name));
+        const kind = topic.name.endsWith(".dlq") ? "Dead letter · " : "";
+        button.appendChild(el("span", "", kind + recordLabel(topic.records)));
+        if (topic.name === current) button.setAttribute("aria-current", "true");
+        button.addEventListener("click", () => openTopic(topic.name, null));
+        topicsEl.appendChild(button);
+      }
+      clear(countsEl);
+      const stats = data.stats || {};
+      for (const item of [
+        ["Published", stats.published],
+        ["Delivered", stats.delivered],
+        ["Acknowledged", stats.acked],
+        ["Dead-lettered", stats.deadLettered]
+      ]) {
+        const p = el("p");
+        p.appendChild(el("strong", "", String(item[1] || 0)));
+        p.appendChild(el("span", "", item[0]));
+        countsEl.appendChild(p);
+      }
+    }
+
+    function headerChip(name, value) {
+      const notable = name === "forgemq-reason" || name === "forgemq-original-topic" || name === "forgemq-original-offset" || name === "forgemq-attempts";
+      return el("span", notable ? "chip reason" : "chip", name + "=" + value);
+    }
+
+    function renderPage(page) {
+      titleEl.textContent = page.name;
+      const retained = Number(page.end) - Number(page.base);
+      ledeEl.textContent = "Retained offsets " + page.base + "–" + (Number(page.end) === 0 ? "0" : String(Number(page.end) - 1)) + " · " + recordLabel(retained) + ". The next offset is " + page.end + ".";
+      clear(detailEl);
+      const groups = el("section", "groups");
+      if (!page.groups.length) {
+        groups.appendChild(el("p", "empty-note", "No group has subscribed to this topic."));
+      } else {
+        for (const group of page.groups) {
+          const card = el("article", "group");
+          card.appendChild(el("strong", "", group.name));
+          const behind = Number(group.behind) === 1 ? "1 behind" : group.behind + " behind";
+          card.appendChild(el("span", "", "Finished " + group.commit + " · " + behind));
+          groups.appendChild(card);
+        }
+      }
+      detailEl.appendChild(groups);
+
+      const pager = el("div", "pager");
+      const older = el("button", "", "Older");
+      older.type = "button";
+      older.disabled = Number(page.from) <= Number(page.base);
+      older.addEventListener("click", () => openTopic(page.name, Math.max(Number(page.base), Number(page.from) - 40)));
+      const newer = el("button", "", "Newer");
+      newer.type = "button";
+      const shownEnd = Number(page.from) + page.messages.length;
+      newer.disabled = shownEnd >= Number(page.end);
+      newer.addEventListener("click", () => openTopic(page.name, shownEnd));
+      const range = page.messages.length
+        ? "Showing " + page.messages[0].offset + "–" + page.messages[page.messages.length - 1].offset
+        : "No records on this page";
+      pager.append(older, newer, el("span", "", range));
+      detailEl.appendChild(pager);
+
+      const log = el("section", "log");
+      if (!page.messages.length) {
+        log.appendChild(el("p", "empty-note", "This topic has no retained records."));
+      }
+      for (const msg of page.messages) {
+        const card = el("article", "record");
+        const head = el("header");
+        head.appendChild(el("span", "offset", String(msg.offset)));
+        const when = el("time", "", msg.time);
+        when.dateTime = msg.time;
+        head.appendChild(when);
+        card.appendChild(head);
+        if (msg.hasKey) card.appendChild(el("p", "key", "Key " + msg.key));
+        const payload = el("pre", "payload");
+        payload.textContent = msg.payloadText ? msg.payload : msg.payload;
+        if (!msg.payloadText) payload.textContent = "hex " + msg.payload;
+        card.appendChild(payload);
+        const headers = el("div", "headers");
+        const names = Object.keys(msg.headers || {}).sort();
+        for (const name of names) headers.appendChild(headerChip(name, msg.headers[name]));
+        if (names.length) card.appendChild(headers);
+        log.appendChild(card);
+      }
+      detailEl.appendChild(log);
+
+      const form = el("form", "compose");
+      form.appendChild(el("h2", "", "Append a record"));
+      const fields = el("div", "fields");
+      const keyLabel = el("label", "", "Key");
+      keyLabel.htmlFor = "msgkey";
+      const key = el("input");
+      key.id = "msgkey";
+      key.autocomplete = "off";
+      keyLabel.appendChild(key);
+      const headerLabel = el("label", "", "Header");
+      const headerRow = el("div", "fields");
+      const headerName = el("input");
+      headerName.placeholder = "name";
+      headerName.autocomplete = "off";
+      const headerValue = el("input");
+      headerValue.placeholder = "value";
+      headerRow.append(headerName, headerValue);
+      headerLabel.appendChild(headerRow);
+      const payloadLabel = el("label", "wide", "Payload");
+      payloadLabel.htmlFor = "msgpayload";
+      const payload = el("textarea");
+      payload.id = "msgpayload";
+      payload.required = true;
+      payloadLabel.appendChild(payload);
+      fields.append(keyLabel, headerLabel, payloadLabel);
+      form.appendChild(fields);
+      const submit = el("button", "primary", "Publish");
+      submit.type = "submit";
+      submit.style.marginTop = "0.75rem";
+      form.appendChild(submit);
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        setStatus(statusEl, "");
+        const headers = {};
+        if (headerName.value.trim()) headers[headerName.value.trim()] = headerValue.value;
+        try {
+          await api("/api/messages", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ topic: page.name, key: key.value, payload: payload.value, headers })
+          });
+          await loadCatalog();
+          await openTopic(page.name, null);
+        } catch (err) {
+          setStatus(statusEl, err.message, true);
+        }
+      });
+      detailEl.appendChild(form);
+    }
+
+    async function openTopic(name, from) {
+      current = name;
+      pageFrom = from;
+      setStatus(statusEl, "");
+      const query = new URLSearchParams({ name });
+      if (from != null) query.set("from", String(from));
+      try {
+        const page = await api("/api/topic?" + query.toString());
+        renderPage(page);
+        await loadCatalog();
+      } catch (err) {
+        setStatus(statusEl, err.message, true);
+      }
+    }
+
+    document.querySelector("#newtopic").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      setStatus(railStatus, "");
+      const name = document.querySelector("#topicname").value.trim();
+      try {
+        await api("/api/topics", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name })
+        });
+        document.querySelector("#topicname").value = "";
+        await openTopic(name, null);
+      } catch (err) {
+        setStatus(railStatus, err.message, true);
+      }
+    });
+    document.querySelector("#refresh").addEventListener("click", async () => {
+      setStatus(statusEl, "");
+      try {
+        await loadCatalog();
+        if (current) await openTopic(current, pageFrom);
+      } catch (err) {
+        setStatus(statusEl, err.message, true);
+      }
+    });
+    loadCatalog().catch((err) => setStatus(statusEl, err.message, true));
+  </script>
+</body>
+</html>

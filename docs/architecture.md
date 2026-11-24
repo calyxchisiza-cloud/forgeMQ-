@@ -14,4 +14,6 @@ When principals are configured, the first command is an authentication frame. A 
 
 `ReceiveN` waits until one delivery is available, then returns further records already in the log without passing the group's prefetch. The benchmarks in the package measure one publish, a synced publish, a synced batch, concurrent publishers, and a consumer draining the log. `-benchmem` reports allocations. A memory profile is an output of the benchmark command, not a file the broker keeps.
 
+`cmd/ui` opens one data directory and serves a page on `127.0.0.1:8093`. The page lists topics and reads a slice of a log through `Inspect`. That read does not join a group and does not move a commit. Publishing from the page uses `Publish`.
+
 One process owns the log. v1 does not run as a cluster.

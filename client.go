@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -11,6 +12,13 @@ import (
 	"sync"
 	"time"
 )
+
+// Options selects a token and TLS for ConnectWith.
+// An empty token speaks to a broker that has no principals.
+type Options struct {
+	Token string
+	TLS   *tls.Config
+}
 
 // Client publishes and subscribes over a TCP connection.
 // A dropped connection is dialed again on the next call.
@@ -27,6 +35,8 @@ type Client struct {
 	pending  map[uint32]chan rpcResult
 	subs     map[uint32]*Subscription
 	dialWait chan struct{}
+	token    string
+	tls      *tls.Config
 }
 
 type rpcResult struct {
@@ -55,6 +65,11 @@ type Event struct {
 
 // Connect dials addr. The dial gives up after 5 seconds.
 func Connect(addr string) (*Client, error) {
+	return ConnectWith(addr, Options{})
+}
+
+// ConnectWith dials addr, presents opt.Token when it is set, and uses TLS when opt.TLS is set.
+func ConnectWith(addr string, opt Options) (*Client, error) {
 	if addr == "" {
 		return nil, errors.New("address is required")
 	}
@@ -63,10 +78,13 @@ func Connect(addr string) (*Client, error) {
 		dead:    true,
 		pending: make(map[uint32]chan rpcResult),
 		subs:    make(map[uint32]*Subscription),
+		token:   opt.Token,
+		tls:     opt.TLS,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := c.reconnect(ctx); err != nil {
+		c.Close()
 		return nil, err
 	}
 	return c, nil
@@ -217,6 +235,10 @@ func (e *Event) Nack(requeue bool) error {
 		flag = 1
 	}
 	return e.finish(opNack, flag, true)
+}
+
+func (e *Event) Poison() error {
+	return e.finish(opPoison, 0, false)
 }
 
 func (e *Event) finish(op uint16, flag byte, nack bool) error {
@@ -381,6 +403,12 @@ func (c *Client) reconnect(ctx context.Context) error {
 		c.dialWait = ch
 		c.mu.Unlock()
 		err := c.dial(ctx)
+		if err == nil && c.token != "" {
+			err = c.authenticate(ctx)
+			if err != nil {
+				c.breakConn()
+			}
+		}
 		c.mu.Lock()
 		c.dialWait = nil
 		close(ch)
@@ -389,9 +417,35 @@ func (c *Client) reconnect(ctx context.Context) error {
 	}
 }
 
+func (c *Client) authenticate(ctx context.Context) error {
+	var buf bytes.Buffer
+	if err := putString(&buf, c.token); err != nil {
+		return err
+	}
+	body, err := c.call(ctx, opAuth, buf.Bytes(), false)
+	if err != nil {
+		return err
+	}
+	code, rest, err := splitStatus(body)
+	if err != nil {
+		return err
+	}
+	if len(rest) != 0 {
+		return ErrBadRequest
+	}
+	return statusError(code)
+}
+
 func (c *Client) dial(ctx context.Context) error {
-	var d net.Dialer
-	conn, err := d.DialContext(ctx, "tcp", c.addr)
+	var conn net.Conn
+	var err error
+	if c.tls != nil {
+		d := tls.Dialer{Config: c.tls}
+		conn, err = d.DialContext(ctx, "tcp", c.addr)
+	} else {
+		var d net.Dialer
+		conn, err = d.DialContext(ctx, "tcp", c.addr)
+	}
 	if err != nil {
 		return err
 	}

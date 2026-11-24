@@ -21,6 +21,8 @@ const (
 	opNack        uint16 = 5
 	opDeliver     uint16 = 6
 	opReceive     uint16 = 7
+	opAuth        uint16 = 8
+	opPoison      uint16 = 9
 
 	statusOK uint16 = iota
 	statusExists
@@ -30,6 +32,9 @@ const (
 	statusSettled
 	statusTooLarge
 	statusBad
+	statusDenied
+	statusLimited
+	statusFault
 )
 
 func frameBytes(corr uint32, op uint16, payload []byte) ([]byte, error) {
@@ -85,6 +90,12 @@ func statusCode(err error) uint16 {
 		return statusSettled
 	case errors.Is(err, ErrTooLarge):
 		return statusTooLarge
+	case errors.Is(err, ErrDenied):
+		return statusDenied
+	case errors.Is(err, ErrLimited):
+		return statusLimited
+	case errors.Is(err, ErrFault):
+		return statusFault
 	default:
 		return statusBad
 	}
@@ -106,6 +117,12 @@ func statusError(code uint16) error {
 		return ErrSettled
 	case statusTooLarge:
 		return ErrTooLarge
+	case statusDenied:
+		return ErrDenied
+	case statusLimited:
+		return ErrLimited
+	case statusFault:
+		return ErrFault
 	default:
 		return ErrBadRequest
 	}

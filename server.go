@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"net"
@@ -32,6 +33,28 @@ func Listen(addr string, b *Broker) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	return serve(ln, b)
+}
+
+// ListenTLS serves the broker with the same frames inside a TLS connection.
+func ListenTLS(addr string, b *Broker, cfg *tls.Config) (*Server, error) {
+	if b == nil {
+		return nil, errors.New("broker is required")
+	}
+	if addr == "" {
+		return nil, errors.New("address is required")
+	}
+	if cfg == nil {
+		return nil, errors.New("tls config is required")
+	}
+	ln, err := tls.Listen("tcp", addr, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return serve(ln, b)
+}
+
+func serve(ln net.Listener, b *Broker) (*Server, error) {
 	s := &Server{ln: ln, b: b, conns: make(map[*wireConn]struct{})}
 	s.wg.Add(1)
 	go s.accept()
@@ -71,8 +94,15 @@ func (s *Server) accept() {
 			nc.Close()
 			return
 		}
+		if len(s.conns) >= s.b.cfg.MaxConnections {
+			s.mu.Unlock()
+			nc.Close()
+			s.b.hitLimit("connections")
+			continue
+		}
 		w := newWire(s, nc)
 		s.conns[w] = struct{}{}
+		s.b.connections.Add(1)
 		s.mu.Unlock()
 		s.wg.Add(1)
 		go func() {
@@ -112,6 +142,9 @@ type wireConn struct {
 	inflight map[uint64]tracked
 	nextSub  uint32
 	nextTok  uint64
+	authed   bool
+	canPub   bool
+	canCons  bool
 }
 
 func newWire(s *Server, c net.Conn) *wireConn {
@@ -144,6 +177,13 @@ func (w *wireConn) readLoop() {
 }
 
 func (w *wireConn) handle(op uint16, payload []byte) []byte {
+	if op == opAuth {
+		return w.onAuth(payload)
+	}
+	consume := op != opCreateTopic && op != opPublish
+	if err := w.permit(consume); err != nil {
+		return statusBody(err)
+	}
 	switch op {
 	case opCreateTopic:
 		return w.onCreate(payload)
@@ -155,9 +195,48 @@ func (w *wireConn) handle(op uint16, payload []byte) []byte {
 		return w.onSettle(payload, true)
 	case opNack:
 		return w.onSettle(payload, false)
+	case opPoison:
+		return w.onPoison(payload)
 	default:
 		return statusBody(ErrBadRequest)
 	}
+}
+
+func (w *wireConn) permit(consume bool) error {
+	if !w.s.b.secured() {
+		return nil
+	}
+	w.mu.Lock()
+	authed := w.authed
+	ok := w.canPub
+	if consume {
+		ok = w.canCons
+	}
+	w.mu.Unlock()
+	if !authed || !ok {
+		w.s.b.deny()
+		return ErrDenied
+	}
+	return nil
+}
+
+func (w *wireConn) onAuth(payload []byte) []byte {
+	r := sliceReader{b: payload}
+	token, err := r.str()
+	if err != nil || !finished(r) {
+		return statusBody(ErrBadRequest)
+	}
+	publish, consume, err := w.s.b.principal(token)
+	if err != nil {
+		w.s.b.deny()
+		return statusBody(err)
+	}
+	w.mu.Lock()
+	w.authed = true
+	w.canPub = publish
+	w.canCons = consume
+	w.mu.Unlock()
+	return statusBody(nil)
 }
 
 func (w *wireConn) onCreate(payload []byte) []byte {
@@ -208,6 +287,12 @@ func (w *wireConn) onSubscribe(payload []byte) []byte {
 		cancel()
 		return statusBody(ErrClosed)
 	}
+	if len(w.subs) >= w.s.b.cfg.MaxSubscriptions {
+		w.mu.Unlock()
+		cancel()
+		w.s.b.hitLimit("subscriptions")
+		return statusBody(ErrLimited)
+	}
 	w.nextSub++
 	sub := &srvSub{id: w.nextSub, consumer: consumer, ctx: ctx, cancel: cancel}
 	w.subs[sub.id] = sub
@@ -219,6 +304,10 @@ func (w *wireConn) onSubscribe(payload []byte) []byte {
 }
 
 func (w *wireConn) startReceive(corr uint32, payload []byte) {
+	if err := w.permit(true); err != nil {
+		w.writeFrame(corr, opReceive, statusBody(err))
+		return
+	}
 	if len(payload) != 4 {
 		w.writeFrame(corr, opReceive, statusBody(ErrBadRequest))
 		return
@@ -272,6 +361,26 @@ func (w *wireConn) onSettle(payload []byte, ack bool) []byte {
 		return statusBody(tr.d.Ack())
 	}
 	return statusBody(tr.d.Nack(requeue))
+}
+
+func (w *wireConn) onPoison(payload []byte) []byte {
+	if len(payload) != 12 {
+		return statusBody(ErrBadRequest)
+	}
+	subID := binary.BigEndian.Uint32(payload[0:4])
+	token := binary.BigEndian.Uint64(payload[4:12])
+	w.mu.Lock()
+	tr, ok := w.inflight[token]
+	if ok && tr.sub == subID {
+		delete(w.inflight, token)
+	} else {
+		ok = false
+	}
+	w.mu.Unlock()
+	if !ok {
+		return statusBody(ErrSettled)
+	}
+	return statusBody(tr.d.Poison())
 }
 
 func (w *wireConn) deliver(corr uint32, sub *srvSub) {
@@ -347,6 +456,7 @@ func (w *wireConn) cleanup() {
 			cancel()
 		}
 		w.c.Close()
+		w.s.b.connections.Add(-1)
 		w.wg.Wait()
 		w.mu.Lock()
 		pending := w.inflight

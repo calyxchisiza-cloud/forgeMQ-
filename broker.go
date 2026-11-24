@@ -3,9 +3,11 @@ package forgemq
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -18,17 +20,34 @@ var (
 	ErrCorrupt       = errors.New("log is corrupt")
 	ErrTooLarge      = errors.New("message is too large")
 	ErrBadRequest    = errors.New("request is not valid")
+	ErrDenied        = errors.New("not allowed")
+	ErrLimited       = errors.New("resource limit reached")
+	ErrFault         = errors.New("injected fault")
 )
+
+// Principal is a client token and the commands it may send.
+// Publish covers creating a topic and appending a record.
+// Consume covers subscribe, receive, and settling a delivery.
+type Principal struct {
+	Token   string
+	Publish bool
+	Consume bool
+}
 
 // Config controls acknowledgement and, for Open, where the log is stored.
 // Zero values use the defaults: a 30 second timeout, 5 attempts, one in-flight
 // message per group, and 1 MiB segments.
 type Config struct {
-	AckTimeout   time.Duration
-	MaxAttempts  int
-	Prefetch     int
-	Dir          string
-	SegmentBytes int
+	AckTimeout       time.Duration
+	MaxAttempts      int
+	Prefetch         int
+	Dir              string
+	SegmentBytes     int
+	Principals       []Principal
+	MaxConnections   int
+	MaxSubscriptions int
+	MaxTopics        int
+	Logger           *slog.Logger
 }
 
 // Broker is a topic log. New keeps it in memory. Open stores it in a directory
@@ -43,6 +62,18 @@ type Broker struct {
 	dir          string
 	segmentBytes int64
 	commits      *commitLog
+	principals   []Principal
+	logger       *slog.Logger
+	faults       atomic.Int64
+	published    atomic.Uint64
+	delivered    atomic.Uint64
+	acked        atomic.Uint64
+	nacked       atomic.Uint64
+	dead         atomic.Uint64
+	authFailures atomic.Uint64
+	limited      atomic.Uint64
+	connections  atomic.Int64
+	faultCount   atomic.Uint64
 }
 
 func New() *Broker {
@@ -80,6 +111,8 @@ func openBroker(cfg Config) (*Broker, error) {
 		cfg:          cfg,
 		dir:          cfg.Dir,
 		segmentBytes: int64(cfg.SegmentBytes),
+		principals:   append([]Principal(nil), cfg.Principals...),
+		logger:       cfg.Logger,
 	}
 	if cfg.Dir == "" {
 		return b, nil
@@ -104,6 +137,15 @@ func normalize(cfg Config) Config {
 	if cfg.SegmentBytes <= 0 {
 		cfg.SegmentBytes = 1 << 20
 	}
+	if cfg.MaxConnections <= 0 {
+		cfg.MaxConnections = 128
+	}
+	if cfg.MaxSubscriptions <= 0 {
+		cfg.MaxSubscriptions = 64
+	}
+	if cfg.MaxTopics <= 0 {
+		cfg.MaxTopics = 1024
+	}
 	return cfg
 }
 
@@ -118,6 +160,10 @@ func (b *Broker) CreateTopic(name string) error {
 	}
 	if _, ok := b.topics[name]; ok {
 		return ErrTopicExists
+	}
+	if len(b.topics) >= b.cfg.MaxTopics {
+		b.hitLimit("topics")
+		return ErrLimited
 	}
 	t := newTopic(b, name)
 	if err := t.prepare(); err != nil {
@@ -135,6 +181,9 @@ func (b *Broker) Publish(msg Message) (Message, error) {
 	if err := validName(msg.Topic); err != nil {
 		return Message{}, err
 	}
+	if b.takeFault() {
+		return Message{}, ErrFault
+	}
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
@@ -148,7 +197,12 @@ func (b *Broker) Publish(msg Message) (Message, error) {
 	b.nextID++
 	id := b.nextID
 	b.mu.Unlock()
-	return t.publish(id, msg)
+	out, err := t.publish(id, msg)
+	if err != nil {
+		return Message{}, err
+	}
+	b.published.Add(1)
+	return out, nil
 }
 
 // Subscribe registers a consumer on a group. A new group starts at the earliest
@@ -368,6 +422,7 @@ func (c *Consumer) Receive(ctx context.Context) (*Delivery, error) {
 		g.flight[offset] = f
 		token := f.token
 		f.timer = time.AfterFunc(g.ackTimeout, func() { t.expire(g, offset, token) })
+		t.broker.delivered.Add(1)
 		return &Delivery{Message: t.messageFor(offset, attempt), topic: t, group: g, offset: offset, token: token}, nil
 	}
 }

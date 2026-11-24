@@ -17,14 +17,24 @@ type Delivery struct {
 }
 
 func (d *Delivery) Ack() error {
-	return d.topic.finish(d.group, d.offset, d.token, true, false)
+	return d.topic.finish(d.group, d.offset, d.token, true, false, "")
 }
 
 func (d *Delivery) Nack(requeue bool) error {
-	return d.topic.finish(d.group, d.offset, d.token, false, requeue)
+	reason := "rejected"
+	if requeue {
+		reason = "attempts"
+	}
+	return d.topic.finish(d.group, d.offset, d.token, false, requeue, reason)
 }
 
-func (t *topic) finish(g *group, offset uint64, token uint64, ack bool, again bool) error {
+// Poison appends the message to the topic's dead-letter log immediately.
+// The reason is "poison". The group's other deliveries are left where they are.
+func (d *Delivery) Poison() error {
+	return d.topic.finish(d.group, d.offset, d.token, false, false, "poison")
+}
+
+func (t *topic) finish(g *group, offset uint64, token uint64, ack bool, again bool, reason string) error {
 	t.mu.Lock()
 	f := g.flight[offset]
 	if f == nil || f.settling || f.token != token {
@@ -41,6 +51,9 @@ func (t *topic) finish(g *group, offset uint64, token uint64, ack bool, again bo
 			t.giveBack(g, offset, f.attempt)
 		}
 		t.mu.Unlock()
+		if err == nil {
+			t.broker.acked.Add(1)
+		}
 		return err
 	}
 	if again && f.attempt < g.maxAttempts {
@@ -48,10 +61,10 @@ func (t *topic) finish(g *group, offset uint64, token uint64, ack bool, again bo
 		g.ready = append([]requeue{{offset: offset, attempt: f.attempt + 1}}, g.ready...)
 		t.cond.Broadcast()
 		t.mu.Unlock()
+		t.broker.nacked.Add(1)
 		return nil
 	}
-	reason := "attempts"
-	if !again {
+	if reason == "" {
 		reason = "rejected"
 	}
 	attempt := f.attempt
@@ -76,6 +89,9 @@ func (t *topic) finish(g *group, offset uint64, token uint64, ack bool, again bo
 	if err := t.complete(g, offset); err != nil {
 		t.giveBack(g, offset, attempt)
 		return err
+	}
+	if reason != "poison" {
+		t.broker.nacked.Add(1)
 	}
 	return nil
 }
@@ -180,5 +196,10 @@ func (b *Broker) deadLetter(topicName string, msg Message, reason string, attemp
 	id := b.nextID
 	b.mu.Unlock()
 	_, err := dest.publish(id, msg)
-	return err
+	if err != nil {
+		return err
+	}
+	b.dead.Add(1)
+	b.logInfo("dead letter", "topic", topicName, "offset", msg.Offset, "reason", reason, "attempts", attempt)
+	return nil
 }

@@ -38,6 +38,23 @@ err = event.Ack()
 
 A segment is removed only after every group has moved past it. A new group then starts at the earliest offset still on disk.
 
+`Poison` appends the current delivery to the topic's dead-letter log with reason `poison` and leaves every other group on its own offset. `Stats` counts publishes, deliveries, acknowledgements, dead letters, refused clients, and injected faults. `InjectPublishFaults` fails the next publishes before a record is stored.
+
+A broker with no principals accepts every connection. Otherwise the client presents a token, and that token may publish, consume, or both. `ListenTLS` carries the same frames over TLS.
+
+```go
+broker, err := forgemq.OpenWith(forgemq.Config{
+    Dir: dir,
+    Principals: []forgemq.Principal{{
+        Token: "accounting", Publish: true, Consume: true,
+    }},
+})
+server, err := forgemq.Listen("127.0.0.1:9090", broker)
+client, err := forgemq.ConnectWith("127.0.0.1:9090", forgemq.Options{Token: "accounting"})
+```
+
+`Listen` refuses a connection past `MaxConnections`. A connection refuses another subscription past `MaxSubscriptions`, and `CreateTopic` refuses another topic past `MaxTopics`. Zero values use 128 connections, 64 subscriptions on a connection, and 1024 topics. The dead-letter log can still be created at the topic cap.
+
 A topic name and a group name start with a letter or `_` and may then contain letters, digits, `.`, `_`, and `-`.
 
 ## Run

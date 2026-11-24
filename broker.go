@@ -17,6 +17,7 @@ var (
 	ErrSettled       = errors.New("delivery is already settled")
 	ErrCorrupt       = errors.New("log is corrupt")
 	ErrTooLarge      = errors.New("message is too large")
+	ErrBadRequest    = errors.New("request is not valid")
 )
 
 // Config controls acknowledgement and, for Open, where the log is stored.

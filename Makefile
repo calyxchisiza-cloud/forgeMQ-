@@ -1,4 +1,4 @@
-.PHONY: test race demo
+.PHONY: test race demo serve
 
 test:
 	go test ./...
@@ -8,3 +8,6 @@ race:
 
 demo:
 	go run ./cmd/demo
+
+serve:
+	go run ./cmd/forgemq

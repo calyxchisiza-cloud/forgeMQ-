@@ -8,4 +8,6 @@ A subscription group is a name plus the next offset that group has not finished.
 
 Opening a directory reads every topic segment, checks each record, and drops a torn tail. A bad checksum with more bytes after it stops recovery. Group offsets are restored from the highest committed value, so a message that was delivered but not acknowledged is delivered again. A segment file is deleted only when every current group has committed past its last offset. `Close` makes a waiting `Receive` return. Publishing to a missing topic fails. Creating a topic twice fails.
 
-Not built yet: TCP, authentication, and more than one broker process.
+`Listen` accepts TCP connections. Each request is one frame: a length, a CRC-32, and a body that names the command. A client can create a topic, publish, subscribe, receive, and acknowledge. The server hands a message to a connection only when that connection asks for one. `Publish` still returns only after the broker has accepted the record. If the connection drops, the server puts every unacknowledged delivery back on the group's queue, and the client's next `Receive` dials again and continues from the stored offset. One process still owns the log.
+
+Not built yet: authentication and more than one broker process.
